@@ -180,6 +180,7 @@ export type DatasetFileSchema = {
     teamId: string;
     tmbId: string;
     encoding?: string;
+    tag?: string;
   };
 };
 

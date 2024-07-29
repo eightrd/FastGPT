@@ -32,6 +32,7 @@ async function handler(req: ApiRequestProps<FileIdCreateDatasetCollectionParams>
     ...body
   } = req.body;
 
+  // 鉴权：鉴定当前用户对知识库是否有写权限；
   const { teamId, tmbId, dataset } = await authDataset({
     req,
     authToken: true,
@@ -40,12 +41,14 @@ async function handler(req: ApiRequestProps<FileIdCreateDatasetCollectionParams>
     datasetId: body.datasetId
   });
 
-  // 1. read file
-  const { rawText, filename } = await readFileContentFromMongo({
+  // 1. read file：这里返回file的metadata，取出来
+  const { rawText, filename, tag } = await readFileContentFromMongo({
     teamId,
     bucketName: BucketNameEnum.dataset,
     fileId
   });
+  console.log('=======tag=======', tag);
+
   // 2. split chunks
   const chunks = rawText2Chunks({
     rawText,
@@ -70,7 +73,8 @@ async function handler(req: ApiRequestProps<FileIdCreateDatasetCollectionParams>
       name: filename,
       fileId,
       metadata: {
-        relatedImgId: fileId
+        relatedImgId: fileId,
+        fileTag: tag
       },
 
       // special metadata
@@ -95,7 +99,7 @@ async function handler(req: ApiRequestProps<FileIdCreateDatasetCollectionParams>
       session
     });
 
-    // 6. insert to training queue
+    // 6. insert to training queue：创建队列时加上id
     await pushDataListToTrainingQueue({
       teamId,
       tmbId,

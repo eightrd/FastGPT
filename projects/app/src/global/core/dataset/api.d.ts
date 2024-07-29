@@ -56,6 +56,7 @@ export type GetTrainingQueueResponse = {
 export type SearchTestProps = {
   datasetId: string;
   text: string;
+  fileTag?: string;
   [NodeInputKeyEnum.datasetSimilarity]?: number;
   [NodeInputKeyEnum.datasetMaxTokens]?: number;
   [NodeInputKeyEnum.datasetSearchMode]?: `${DatasetSearchModeEnum}`;

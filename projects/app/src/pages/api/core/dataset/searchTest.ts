@@ -26,7 +26,8 @@ async function handler(req: NextApiRequest) {
 
     datasetSearchUsingExtensionQuery = true,
     datasetSearchExtensionModel,
-    datasetSearchExtensionBg = ''
+    datasetSearchExtensionBg = '',
+    fileTag = '' // todo 测试的话可以添加默认值 TESTTAG
   } = req.body as SearchTestProps;
 
   if (!datasetId || !text) {
@@ -35,7 +36,7 @@ async function handler(req: NextApiRequest) {
 
   const start = Date.now();
 
-  // auth dataset role
+  // auth dataset role：检测用户是否有知识库的“读”权限；
   const { dataset, teamId, tmbId, apikey } = await authDataset({
     req,
     authToken: true,
@@ -43,10 +44,10 @@ async function handler(req: NextApiRequest) {
     datasetId,
     per: ReadPermissionVal
   });
-  // auth balance
+  // auth balance: 检测团队的账户余额；
   await checkTeamAIPoints(teamId);
 
-  // query extension
+  // query extension: 检测是否开启问题补全配置，如开启则将对应的搜索文本、对话记录传给AI模型，重新生成检索文本；
   const extensionModel =
     datasetSearchUsingExtensionQuery && datasetSearchExtensionModel
       ? getLLMModel(datasetSearchExtensionModel)
@@ -56,7 +57,9 @@ async function handler(req: NextApiRequest) {
     extensionModel,
     extensionBg: datasetSearchExtensionBg
   });
+  console.log('datasetSearchQueryExtension===', concatQueries, rewriteQuery, aiExtensionResult);
 
+  // 去检索相关数据
   const { searchRes, tokens, ...result } = await searchDatasetData({
     teamId,
     reRankQuery: rewriteQuery,
@@ -66,10 +69,11 @@ async function handler(req: NextApiRequest) {
     similarity,
     datasetIds: [datasetId],
     searchMode,
-    usingReRank: usingReRank && (await checkTeamReRankPermission(teamId))
+    usingReRank: usingReRank && (await checkTeamReRankPermission(teamId)),
+    fileTag
   });
 
-  // push bill
+  // push bill: 更新团队的账单
   const { totalPoints } = pushGenerateVectorUsage({
     teamId,
     tmbId,
@@ -83,6 +87,7 @@ async function handler(req: NextApiRequest) {
         extensionTokens: aiExtensionResult.tokens
       })
   });
+  // 更新apikey的使用记录
   if (apikey) {
     updateApiKeyUsage({
       apikey,
@@ -90,6 +95,7 @@ async function handler(req: NextApiRequest) {
     });
   }
 
+  // 检索用时记录，返回检索结果
   return {
     list: searchRes,
     duration: `${((Date.now() - start) / 1000).toFixed(3)}s`,

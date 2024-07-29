@@ -31,6 +31,7 @@ type SearchDatasetDataProps = {
   usingReRank?: boolean;
   reRankQuery: string;
   queries: string[];
+  fileTag?: string;
 };
 
 export async function searchDatasetData(props: SearchDatasetDataProps) {
@@ -40,11 +41,14 @@ export async function searchDatasetData(props: SearchDatasetDataProps) {
     queries,
     model,
     similarity = 0,
-    limit: maxTokens,
-    searchMode = DatasetSearchModeEnum.embedding,
+    limit: maxTokens, // 引用的 token上限；
+    searchMode = DatasetSearchModeEnum.embedding, // 检索模式；
     usingReRank = false,
-    datasetIds = []
+    datasetIds = [],
+    fileTag
   } = props;
+
+  // fileTag = '';
 
   /* init params */
   searchMode = DatasetSearchModeMap[searchMode] ? searchMode : DatasetSearchModeEnum.embedding;
@@ -73,6 +77,24 @@ export async function searchDatasetData(props: SearchDatasetDataProps) {
       fullTextLimit: 60
     };
   };
+
+  // 获取有文件tag，且非forbid的集合
+  const getFileTagValidData = async () => {
+    const collections = await MongoDatasetCollection.find(
+      {
+        teamId,
+        datasetId: { $in: datasetIds },
+        'metadata.fileTag': { $eq: fileTag },
+        forbid: false
+      },
+      '_id'
+    );
+
+    return {
+      fileTagValidCollectionIdList: (collections || []).map((item) => String(item._id))
+    };
+  };
+
   const getForbidData = async () => {
     const collections = await MongoDatasetCollection.find(
       {
@@ -90,27 +112,32 @@ export async function searchDatasetData(props: SearchDatasetDataProps) {
   const embeddingRecall = async ({
     query,
     limit,
-    forbidCollectionIdList
+    forbidCollectionIdList,
+    fileTagValidCollectionIdList
   }: {
     query: string;
     limit: number;
     forbidCollectionIdList: string[];
+    fileTagValidCollectionIdList: string[];
   }) => {
+    // 获取查询语句的向量
     const { vectors, tokens } = await getVectorsByText({
       model: getVectorModel(model),
       input: query,
       type: 'query'
     });
 
+    // 从向量存储中检索最相似的数据点
     const { results } = await recallFromVectorStore({
       teamId,
       datasetIds,
       vector: vectors[0],
       limit,
-      forbidCollectionIdList
+      forbidCollectionIdList,
+      fileTagValidCollectionIdList
     });
 
-    // get q and a
+    // get q and a: 使用MongoDatasetData模型查询MongoDB数据库
     const dataList = (await MongoDatasetData.find(
       {
         teamId,
@@ -119,11 +146,12 @@ export async function searchDatasetData(props: SearchDatasetDataProps) {
         'indexes.dataId': { $in: results.map((item) => item.id?.trim()) }
       },
       'datasetId collectionId q a chunkIndex indexes'
-    )
+    ) // 使用 Mongoose 的 populate 方法来“填充”collectionId 字段。这意味着对于查询结果中的每个文档，它都会查找与 collectionId 关联的文档，并只返回这些关联文档的 name, fileId, rawLink, externalFileId, 和 externalFileUrl 字段。
       .populate('collectionId', 'name fileId rawLink externalFileId externalFileUrl')
+      // 告诉 Mongoose 返回纯 JavaScript 对象，而不是 Mongoose 文档。这通常用于提高性能，因为 Mongoose 文档具有额外的功能（如保存、更新等），而这些功能在某些情况下可能不需要。
       .lean()) as DatasetDataWithCollectionType[];
 
-    // add score to data(It's already sorted. The first one is the one with the most points)
+    // add score to data(It's already sorted. The first one is the one with the most points) 将得分添加到每个数据记录中。
     const concatResults = dataList.map((data) => {
       const dataIdList = data.indexes.map((item) => item.dataId);
 
@@ -137,6 +165,7 @@ export async function searchDatasetData(props: SearchDatasetDataProps) {
       };
     });
 
+    // 按照分数排序
     concatResults.sort((a, b) => b.score - a.score);
 
     const formatResult = concatResults.map((data, index) => {
@@ -210,10 +239,16 @@ export async function searchDatasetData(props: SearchDatasetDataProps) {
                 let: { collectionId: '$collectionId' },
                 pipeline: [
                   {
-                    $match: {
-                      $expr: { $eq: ['$_id', '$$collectionId'] },
-                      forbid: { $eq: true } // 匹配被禁用的数据
-                    }
+                    $match: fileTag
+                      ? {
+                          $expr: { $eq: ['$_id', '$$collectionId'] },
+                          forbid: { $eq: false },
+                          'metadata.fileTag': { $eq: fileTag }
+                        }
+                      : {
+                          $expr: { $eq: ['$_id', '$$collectionId'] },
+                          forbid: { $eq: true }
+                        }
                   },
                   {
                     $project: {
@@ -226,7 +261,7 @@ export async function searchDatasetData(props: SearchDatasetDataProps) {
             },
             {
               $match: {
-                collection: { $eq: [] } // 没有 forbid=true 的数据
+                collection: fileTag ? { $ne: [] } : { $eq: [] }
               }
             },
             {
@@ -327,15 +362,34 @@ export async function searchDatasetData(props: SearchDatasetDataProps) {
     const fullTextRecallResList: SearchDataResponseItemType[][] = [];
     let totalTokens = 0;
 
-    const { forbidCollectionIdList } = await getForbidData();
+    let forbidCollectionIdList: string[] = [];
+    let fileTagValidCollectionIdList: string[];
 
+    // 如果搜索没有带fileTag参数，则按照原来逻辑，只过滤非禁用的集合
+    if (!fileTag) {
+      const forbidCollectionRes = await getForbidData();
+      forbidCollectionIdList = forbidCollectionRes.forbidCollectionIdList;
+    } else {
+      // 如果搜索传入了fileTag, 则用过滤带tag并且非禁用的集合
+      const res = await getFileTagValidData();
+      fileTagValidCollectionIdList = res?.fileTagValidCollectionIdList;
+    }
+
+    console.log(
+      '-------fileTagIdValidList, forbidCollectionIdList-----',
+      fileTagValidCollectionIdList,
+      forbidCollectionIdList
+    );
+
+    // 首先分别获取 embedding、fulltext 的召回语料；
     await Promise.all(
       queries.map(async (query) => {
         const [{ tokens, embeddingRecallResults }, { fullTextRecallResults }] = await Promise.all([
           embeddingRecall({
             query,
             limit: embeddingLimit,
-            forbidCollectionIdList
+            forbidCollectionIdList,
+            fileTagValidCollectionIdList
           }),
           fullTextRecall({
             query,
@@ -365,7 +419,7 @@ export async function searchDatasetData(props: SearchDatasetDataProps) {
   };
 
   /* main step */
-  // count limit
+  // count limit: 根据检索模式设置向量检索和文本检索的限制
   const { embeddingLimit, fullTextLimit } = countRecallLimit();
 
   // recall
@@ -373,6 +427,7 @@ export async function searchDatasetData(props: SearchDatasetDataProps) {
     embeddingLimit,
     fullTextLimit
   });
+  // console.log('---multiQueryRecall---', embeddingRecallResults, fullTextRecallResults);
 
   // ReRank results
   const reRankResults = await (async () => {
@@ -398,14 +453,14 @@ export async function searchDatasetData(props: SearchDatasetDataProps) {
     });
   })();
 
-  // embedding recall and fullText recall rrf concat
+  // embedding recall and fullText recall rrf concat:对重复的数据去重并使用最高得分；计算 rrfScore 并以其为依据排序；
   const rrfConcatResults = datasetSearchResultConcat([
     { k: 60, list: embeddingRecallResults },
     { k: 60, list: fullTextRecallResults },
     { k: 58, list: reRankResults }
   ]);
 
-  // remove same q and a data
+  // remove same q and a data: 结果去重
   set = new Set<string>();
   const filterSameDataResults = rrfConcatResults.filter((item) => {
     // 删除所有的标点符号与空格等，只对文本进行比较
@@ -415,7 +470,7 @@ export async function searchDatasetData(props: SearchDatasetDataProps) {
     return true;
   });
 
-  // score filter
+  // score filter：根据用户设置的最小分数过滤数据
   const scoreFilter = (() => {
     if (usingReRank) {
       usingSimilarityFilter = true;
