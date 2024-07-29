@@ -119,12 +119,34 @@ export class PgVectorCtrl {
     }
   };
   embRecall = async (props: EmbeddingRecallCtrlProps): Promise<EmbeddingRecallResponse> => {
-    const { teamId, datasetIds, vector, limit, forbidCollectionIdList, retry = 2 } = props;
+    const {
+      teamId,
+      datasetIds,
+      vector,
+      limit,
+      forbidCollectionIdList,
+      retry = 2,
+      fileTagValidCollectionIdList
+    } = props;
 
     const forbidCollectionSql =
       forbidCollectionIdList.length > 0
         ? `AND collection_id NOT IN (${forbidCollectionIdList.map((id) => `'${String(id)}'`).join(',')})`
         : 'AND collection_id IS NOT NULL';
+
+    // 如果fileTagValidCollectionIdList存在，则都使用fileTagValidCollectionIdList的搜索语句，否则，则走forbidCollectionSql
+    const collectionIdSql = fileTagValidCollectionIdList
+      ? fileTagValidCollectionIdList.length > 0
+        ? `and collection_id in (${fileTagValidCollectionIdList.map((id) => `'${String(id)}'`).join(',')})`
+        : 'AND collection_id IS NOT NULL'
+      : forbidCollectionSql;
+
+    console.log(
+      '------collectionIdSql----',
+      forbidCollectionIdList,
+      fileTagValidCollectionIdList,
+      collectionIdSql
+    );
     // const forbidDataSql =
     //   forbidEmbIndexIdList.length > 0 ? `AND id NOT IN (${forbidEmbIndexIdList.join(',')})` : '';
 
@@ -142,6 +164,20 @@ export class PgVectorCtrl {
       // );
       // console.log(explan[2].rows);
 
+      console.log(
+        '===sql',
+        `
+        BEGIN;
+          SET LOCAL hnsw.ef_search = ${global.systemEnv?.pgHNSWEfSearch || 100};
+          select id, collection_id, vector <#> '[${vector}]' AS score 
+            from ${DatasetVectorTableName} 
+            where team_id='${teamId}'
+              AND dataset_id IN (${datasetIds.map((id) => `'${String(id)}'`).join(',')})
+              ${collectionIdSql}
+            order by score limit ${limit};
+        COMMIT;`
+      );
+
       const results: any = await PgClient.query(
         `
         BEGIN;
@@ -150,7 +186,7 @@ export class PgVectorCtrl {
             from ${DatasetVectorTableName} 
             where team_id='${teamId}'
               AND dataset_id IN (${datasetIds.map((id) => `'${String(id)}'`).join(',')})
-              ${forbidCollectionSql}
+              ${collectionIdSql}
             order by score limit ${limit};
         COMMIT;`
       );

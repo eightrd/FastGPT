@@ -213,19 +213,34 @@ export class MilvusCtrl {
   };
   embRecall = async (props: EmbeddingRecallCtrlProps): Promise<EmbeddingRecallResponse> => {
     const client = await this.getClient();
-    const { teamId, datasetIds, vector, limit, forbidCollectionIdList, retry = 2 } = props;
+    const {
+      teamId,
+      datasetIds,
+      vector,
+      limit,
+      forbidCollectionIdList,
+      retry = 2,
+      fileTagValidCollectionIdList
+    } = props;
 
     const forbidColQuery =
       forbidCollectionIdList.length > 0
         ? `and (collectionId not in [${forbidCollectionIdList.map((id) => `"${String(id)}"`).join(',')}])`
         : '';
 
+    // 如果fileTagValidCollectionIdList存在，则都使用fileTagValidCollectionIdList的搜索语句，否则，则走forbidCollectionSql
+    const collectionIdSql = fileTagValidCollectionIdList
+      ? fileTagValidCollectionIdList.length > 0
+        ? `and (collectionId in [${fileTagValidCollectionIdList.map((id) => `"${String(id)}"`).join(',')}])`
+        : 'AND collection_id IS NOT NULL'
+      : forbidColQuery;
+
     try {
       const { results } = await client.search({
         collection_name: DatasetVectorTableName,
         data: vector,
         limit,
-        filter: `(teamId == "${teamId}") and (datasetId in [${datasetIds.map((id) => `"${String(id)}"`).join(',')}]) ${forbidColQuery}`,
+        filter: `(teamId == "${teamId}") and (datasetId in [${datasetIds.map((id) => `"${String(id)}"`).join(',')}]) ${collectionIdSql}`,
         output_fields: ['collectionId']
       });
 
